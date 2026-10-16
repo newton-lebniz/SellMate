@@ -1,15 +1,29 @@
-"""Talks to a local Ollama server. No cloud calls anywhere."""
+"""Talks to a local Ollama server. No cloud calls anywhere.
+
+Two-stage pipeline, so a small CPU-friendly setup works:
+  1. a tiny vision model (Moondream) describes each photo
+  2. a text model (Gemma) writes the listing from that description + the seller's words
+If VISION_MODEL is empty, photos go straight to the text model instead (that needs a
+vision-capable model such as gemma3:4b).
+"""
 import base64
 import io
 import json
 import re
+import time
+from dataclasses import dataclass
 
 import httpx
 from PIL import Image, ImageOps
 
 from . import config
-from .models import Listing
-from .prompts import SYSTEM_PROMPT, build_listing_prompt
+from .models import ChatTurn, Listing
+from .prompts import (
+    SYSTEM_PROMPT,
+    VISION_PROMPT,
+    build_chat_system_prompt,
+    build_listing_prompt,
+)
 
 
 class LLMError(RuntimeError):
@@ -42,58 +56,189 @@ def to_b64(jpeg_bytes: bytes) -> str:
 
 # ---------- parsing ----------
 
-def parse_listing_json(text: str) -> Listing:
+def _extract_json(text: str) -> dict | None:
     """Small models sometimes wrap JSON in prose or code fences, so be forgiving."""
-    data = None
     try:
         data = json.loads(text)
     except (json.JSONDecodeError, TypeError):
         match = re.search(r"\{.*\}", text or "", re.DOTALL)
-        if match:
-            try:
-                data = json.loads(match.group(0))
-            except json.JSONDecodeError:
-                data = None
-    if not isinstance(data, dict):
-        raise LLMError("The model didn't return a usable listing. Please try again.")
+        if not match:
+            return None
+        try:
+            data = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return None
+    return data if isinstance(data, dict) else None
 
-    def as_list(value) -> list[str]:
-        if isinstance(value, str):
-            value = [value]
-        if not isinstance(value, list):
-            return []
-        return [str(v).strip() for v in value if str(v).strip()]
+
+def _as_list(value) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    return [str(v).strip() for v in value if str(v).strip()]
+
+
+def parse_listing_json(text: str) -> Listing:
+    data = _extract_json(text)
+    if data is None:
+        raise LLMError("The model didn't return a usable listing. Please try again.")
 
     title = str(data.get("title", "")).strip()[:70]
     description = str(data.get("description", "")).strip()
     if not title or not description:
         raise LLMError("The listing came back without a title or description.")
 
-    tags = [t.lstrip("#").strip().lower() for t in as_list(data.get("tags"))]
+    tags = [t.lstrip("#").strip().lower() for t in _as_list(data.get("tags"))]
     return Listing(
         title=title,
         description=description,
-        highlights=as_list(data.get("highlights")),
+        highlights=_as_list(data.get("highlights")),
         tags=[t for t in tags if t],
-        missing_info=as_list(data.get("missing_info")),
+        missing_info=_as_list(data.get("missing_info")),
     )
 
 
-# ---------- Ollama ----------
+def parse_chat_json(text: str) -> tuple[str, bool]:
+    """Return (answer, grounded). If the model ignored the JSON format and just
+    wrote prose, keep the prose but treat it as NOT grounded so the seller is told."""
+    data = _extract_json(text)
+    if data is not None and str(data.get("answer", "")).strip():
+        grounded = data.get("answered_from_catalog") is True
+        return str(data["answer"]).strip(), grounded
+    plain = (text or "").strip()
+    if plain and not plain.startswith("{"):
+        return plain, False
+    raise LLMError("The assistant didn't produce an answer. Please try again.")
+
+
+# ---------- Ollama plumbing ----------
+
+def _has_model(installed: list[str], wanted: str) -> bool:
+    """'moondream' matches 'moondream:latest'; 'gemma3:1b' must match exactly."""
+    if not wanted:
+        return False
+    for name in installed:
+        if name == wanted or (":" not in wanted and name == f"{wanted}:latest"):
+            return True
+    return False
+
+
+def two_stage() -> bool:
+    return bool(config.VISION_MODEL) and config.VISION_MODEL != config.OLLAMA_MODEL
+
 
 def ollama_status() -> dict:
-    """Is Ollama up, and is the configured model downloaded?"""
-    status = {"ollama": False, "model": config.OLLAMA_MODEL, "model_ready": False}
+    """Is Ollama up, and are the models we need downloaded (and able to see)?"""
+    needs_vision = bool(config.VISION_MODEL)
+    status = {
+        "ollama": False,
+        "mode": "two-stage" if two_stage() else "single-model",
+        "text_model": config.OLLAMA_MODEL,
+        "text_ready": False,
+        "vision_model": config.VISION_MODEL or config.OLLAMA_MODEL,
+        "vision_ready": False,
+    }
     try:
         r = httpx.get(f"{config.OLLAMA_URL}/api/tags", timeout=3)
         r.raise_for_status()
     except httpx.HTTPError:
         return status
     status["ollama"] = True
-    names = [m.get("name", "") for m in r.json().get("models", [])]
-    wanted = config.OLLAMA_MODEL
-    status["model_ready"] = any(n == wanted or n.split(":")[0] == wanted for n in names)
+    installed = [m.get("name", "") for m in r.json().get("models", [])]
+    status["text_ready"] = _has_model(installed, config.OLLAMA_MODEL)
+
+    vision_name = config.VISION_MODEL or config.OLLAMA_MODEL
+    status["vision_ready"] = _has_model(installed, vision_name)
+    if status["vision_ready"] and not needs_vision:
+        # Single-model mode: the text model must really accept images.
+        status["vision_ready"] = _model_can_see(vision_name)
     return status
+
+
+def _model_can_see(model: str) -> bool:
+    """Newer Ollama versions list capabilities in /api/show. If it's not listed, assume yes."""
+    try:
+        r = httpx.post(f"{config.OLLAMA_URL}/api/show", json={"model": model}, timeout=5)
+        caps = r.json().get("capabilities")
+    except (httpx.HTTPError, ValueError):
+        return True
+    return True if not caps else "vision" in caps
+
+
+def _ollama_error(response: httpx.Response, model: str) -> str:
+    try:
+        detail = str(response.json().get("error", ""))
+    except ValueError:
+        detail = ""
+    low = detail.lower()
+    if response.status_code == 404 or "not found" in low:
+        return f"Model '{model}' not found. Run: ollama pull {model}"
+    if "multimodal" in low or "image" in low:
+        return (
+            f"'{model}' can't read images. Set VISION_MODEL to a vision model "
+            "(run `ollama pull moondream`, then restart SellMate)."
+        )
+    return f"Ollama error {response.status_code}: {detail or 'no details given'}"
+
+
+def _chat(
+    model: str,
+    messages: list[dict],
+    *,
+    json_mode: bool = False,
+    num_predict: int = 700,
+    temperature: float = 0.4,
+) -> str:
+    payload = {
+        "model": model,
+        "stream": False,
+        "messages": messages,
+        "options": {"temperature": temperature, "num_predict": num_predict},
+    }
+    if json_mode:
+        payload["format"] = "json"
+    try:
+        r = httpx.post(
+            f"{config.OLLAMA_URL}/api/chat", json=payload, timeout=config.OLLAMA_TIMEOUT
+        )
+    except httpx.ConnectError as exc:
+        raise LLMError(
+            f"Can't reach Ollama at {config.OLLAMA_URL}. Start it with `ollama serve`."
+        ) from exc
+    except httpx.TimeoutException as exc:
+        raise LLMError(
+            "The model took too long. On CPU, try one smaller photo or raise OLLAMA_TIMEOUT."
+        ) from exc
+    if r.status_code != 200:
+        raise LLMError(_ollama_error(r, model))
+    return r.json().get("message", {}).get("content", "") or ""
+
+
+# ---------- listing generation ----------
+
+@dataclass
+class Generation:
+    listing: Listing
+    visual_notes: str
+    vision_seconds: float
+    writing_seconds: float
+
+
+def describe_photos(images_b64: list[str]) -> str:
+    """Stage 1: one call per photo (small vision models handle one image at a time)."""
+    notes = []
+    for i, image in enumerate(images_b64, start=1):
+        text = _chat(
+            config.VISION_MODEL,
+            [{"role": "user", "content": VISION_PROMPT, "images": [image]}],
+            num_predict=160,
+            temperature=0.2,
+        ).strip()
+        if not text:
+            raise LLMError(f"The vision model returned nothing for photo {i}.")
+        notes.append(f"Photo {i}: {text}")
+    return "\n".join(notes)
 
 
 def generate_listing(
@@ -101,38 +246,48 @@ def generate_listing(
     keywords: str,
     price: str | None = None,
     category: str | None = None,
-) -> Listing:
-    payload = {
-        "model": config.OLLAMA_MODEL,
-        "stream": False,
-        "format": "json",
-        "options": {"temperature": 0.4, "num_predict": 700},
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {
-                "role": "user",
-                "content": build_listing_prompt(keywords, price, category),
-                "images": images_b64,
-            },
-        ],
-    }
-    try:
-        r = httpx.post(
-            f"{config.OLLAMA_URL}/api/chat", json=payload, timeout=config.OLLAMA_TIMEOUT
-        )
-    except httpx.ConnectError as exc:
-        raise LLMError(
-            "Can't reach Ollama. Start it with `ollama serve` and try again."
-        ) from exc
-    except httpx.TimeoutException as exc:
-        raise LLMError(
-            "The model took too long. On CPU, try one smaller photo or raise OLLAMA_TIMEOUT."
-        ) from exc
+) -> Generation:
+    started = time.perf_counter()
+    visual_notes = ""
+    if two_stage():
+        visual_notes = describe_photos(images_b64)
+        user = {
+            "role": "user",
+            "content": build_listing_prompt(keywords, price, category, visual_notes),
+        }
+    else:
+        user = {
+            "role": "user",
+            "content": build_listing_prompt(keywords, price, category),
+            "images": images_b64,
+        }
+    vision_done = time.perf_counter()
 
-    if r.status_code == 404:
-        raise LLMError(f"Model not found. Run: ollama pull {config.OLLAMA_MODEL}")
-    if r.status_code >= 400:
-        raise LLMError(f"Ollama returned an error ({r.status_code}).")
+    text = _chat(
+        config.OLLAMA_MODEL,
+        [{"role": "system", "content": SYSTEM_PROMPT}, user],
+        json_mode=True,
+        num_predict=700,
+    )
+    listing = parse_listing_json(text)
+    finished = time.perf_counter()
+    return Generation(
+        listing=listing,
+        visual_notes=visual_notes,
+        vision_seconds=round(vision_done - started, 1),
+        writing_seconds=round(finished - vision_done, 1),
+    )
 
-    content = r.json().get("message", {}).get("content", "")
-    return parse_listing_json(content)
+
+# ---------- buyer chat ----------
+
+def answer_question(question: str, history: list[ChatTurn], facts: str) -> tuple[str, bool]:
+    """Answer a buyer's question from the given catalog facts. Returns (answer, grounded)."""
+    messages = [{"role": "system", "content": build_chat_system_prompt(facts)}]
+    for turn in history[-config.MAX_HISTORY_TURNS:]:
+        messages.append({"role": turn.role, "content": turn.content})
+    messages.append({"role": "user", "content": question})
+    text = _chat(
+        config.OLLAMA_MODEL, messages, json_mode=True, num_predict=250, temperature=0.2
+    )
+    return parse_chat_json(text)

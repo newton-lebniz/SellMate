@@ -10,6 +10,7 @@ venv/
 
 # Runtime data (seller catalogs and photos stay on the seller's machine)
 data/catalog.json
+data/questions.json
 data/uploads/*
 !data/uploads/.gitkeep
 

@@ -1,8 +1,13 @@
 """Data schemas shared by the LLM layer, storage and the API."""
 from datetime import datetime, timezone
+from typing import Literal
 from uuid import uuid4
 
 from pydantic import BaseModel, Field
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 class Listing(BaseModel):
@@ -26,8 +31,50 @@ class Product(BaseModel):
     category: str | None = None
     photos: list[str] = Field(default_factory=list)
     listing: Listing
+    # What the vision model saw (automatic, can be imperfect).
+    visual_notes: str = ""
+    # Facts the seller typed in themselves. These are the most trusted source for buyer chat.
+    seller_notes: str = ""
     model: str
-    generation_seconds: float = 0.0
-    created_at: str = Field(
-        default_factory=lambda: datetime.now(timezone.utc).isoformat(timespec="seconds")
-    )
+    vision_model: str = ""
+    vision_seconds: float = 0.0
+    writing_seconds: float = 0.0
+    generation_seconds: float = 0.0  # total
+    created_at: str = Field(default_factory=_now)
+
+
+class ProductUpdate(BaseModel):
+    """Fields a seller can edit after the listing is written."""
+
+    price: str | None = Field(default=None, max_length=40)
+    seller_notes: str | None = Field(default=None, max_length=800)
+
+
+# ---------- buyer chat ----------
+
+class ChatTurn(BaseModel):
+    role: Literal["user", "assistant"]
+    content: str = Field(max_length=1200)  # assistant replies can be longer than a buyer's question
+
+
+class ChatRequest(BaseModel):
+    message: str = Field(min_length=1, max_length=500)
+    history: list[ChatTurn] = Field(default_factory=list, max_length=40)
+    product_id: str | None = None
+
+
+class ChatResponse(BaseModel):
+    answer: str
+    # True only if the model says the answer came from the catalog facts.
+    grounded: bool
+    product_ids: list[str] = Field(default_factory=list)
+
+
+class Question(BaseModel):
+    """A buyer question the assistant could not answer; the seller sees these."""
+
+    id: str = Field(default_factory=lambda: uuid4().hex[:10])
+    question: str
+    product_id: str | None = None
+    product_name: str | None = None
+    created_at: str = Field(default_factory=_now)

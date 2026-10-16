@@ -1,40 +1,34 @@
-// SellMate frontend. Plain JS, no build step.
-// All dynamic text goes through textContent / append(), never innerHTML,
-// so model output can't inject markup into the page.
-
-const $ = (selector) => document.querySelector(selector);
-
-function el(tag, props = {}, ...children) {
-  const node = document.createElement(tag);
-  for (const [key, value] of Object.entries(props)) {
-    if (key === "class") node.className = value;
-    else if (key.startsWith("on")) node.addEventListener(key.slice(2), value);
-    else node.setAttribute(key, value);
-  }
-  node.append(...children.flat().filter((c) => c !== null && c !== undefined));
-  return node;
-}
+// Seller desk. Needs common.js loaded first.
 
 // ---------- model health ----------
 
 async function checkHealth() {
   const pill = $("#health");
+  const set = (cls, text) => {
+    pill.className = `pill ${cls}`;
+    pill.textContent = text;
+  };
   try {
-    const res = await fetch("/api/health");
-    const h = await res.json();
-    if (!h.ollama) {
-      pill.className = "pill pill-bad";
-      pill.textContent = "Ollama not running";
-    } else if (!h.model_ready) {
-      pill.className = "pill pill-warn";
-      pill.textContent = `Run: ollama pull ${h.model}`;
-    } else {
-      pill.className = "pill pill-ok";
-      pill.textContent = `${h.model} ready`;
+    const h = await api("/api/health");
+    if (!h.ollama) return set("pill-bad", "Ollama not running");
+
+    const todo = [];
+    if (!h.text_ready) todo.push(`ollama pull ${h.text_model}`);
+    if (h.mode === "two-stage") {
+      if (!h.vision_ready) todo.push(`ollama pull ${h.vision_model}`);
+    } else if (h.text_ready && !h.vision_ready) {
+      return set("pill-warn", `${h.text_model} can't read photos. Set VISION_MODEL`);
     }
+    if (todo.length) return set("pill-warn", `Run: ${todo.join(" and ")}`);
+
+    set(
+      "pill-ok",
+      h.mode === "two-stage"
+        ? `${h.vision_model} + ${h.text_model} ready`
+        : `${h.text_model} ready`
+    );
   } catch {
-    pill.className = "pill pill-bad";
-    pill.textContent = "Server unreachable";
+    set("pill-bad", "Server unreachable");
   }
 }
 
@@ -46,8 +40,7 @@ const previews = $("#previews");
 
 function showPreviews() {
   previews.replaceChildren();
-  const files = [...input.files].slice(0, 3);
-  for (const file of files) {
+  for (const file of [...input.files].slice(0, 3)) {
     previews.append(el("img", { src: URL.createObjectURL(file), alt: file.name }));
   }
 }
@@ -85,18 +78,17 @@ form.addEventListener("submit", async (event) => {
 
   submitBtn.disabled = true;
   const started = Date.now();
-  const timer = setInterval(() => {
+  const tick = () => {
     const s = Math.round((Date.now() - started) / 1000);
-    setStatus(`Gemma is studying your photos… ${s}s (on a CPU this can take a minute or two)`);
-  }, 1000);
-  setStatus("Gemma is studying your photos…");
+    setStatus(`Looking at your photos, then writing… ${s}s (on a CPU this can take a minute or two)`);
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
 
   try {
-    const res = await fetch("/api/products", { method: "POST", body: new FormData(form) });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) throw new Error(data.detail || `Something went wrong (${res.status}).`);
-    renderListing(data);
-    setStatus("Done. Saved to your catalog.");
+    const product = await api("/api/products", { method: "POST", body: new FormData(form) });
+    renderListing(product);
+    setStatus("Done. Saved to your catalog. Add the missing details so buyers get answers.");
     form.reset();
     previews.replaceChildren();
     loadCatalog();
@@ -108,7 +100,7 @@ form.addEventListener("submit", async (event) => {
   }
 });
 
-// ---------- rendering ----------
+// ---------- listing view ----------
 
 function listingText(product) {
   const { listing, price } = product;
@@ -116,6 +108,7 @@ function listingText(product) {
   if (listing.highlights.length) {
     parts.push("", ...listing.highlights.map((h) => `• ${h}`));
   }
+  if (product.seller_notes) parts.push("", product.seller_notes);
   if (price) parts.push("", `Price: ${price}`);
   return parts.join("\n");
 }
@@ -131,10 +124,50 @@ async function copyText(text, button) {
   }
 }
 
+// The seller's own facts are what the buyer-facing assistant trusts most.
+function detailsBox(product) {
+  const notes = el("textarea", {
+    rows: "3",
+    maxlength: "800",
+    placeholder: "e.g. Sterling silver, 6 cm long, nickel free. Ships in 2 days.",
+    "aria-label": "Details for buyers",
+  });
+  notes.value = product.seller_notes || "";
+  const saved = el("span", { class: "meta" });
+  const saveBtn = el("button", { class: "btn btn-small", type: "button" }, "Save details");
+  saveBtn.addEventListener("click", async () => {
+    saveBtn.disabled = true;
+    try {
+      const updated = await api(`/api/products/${product.id}`, {
+        method: "PATCH",
+        json: { seller_notes: notes.value },
+      });
+      product.seller_notes = updated.seller_notes;
+      saved.textContent = "Saved. The shop assistant will use this.";
+      loadCatalog();
+    } catch (err) {
+      saved.textContent = err.message;
+    } finally {
+      saveBtn.disabled = false;
+    }
+  });
+  return el(
+    "div",
+    { class: "details" },
+    el("strong", {}, "Your details for buyers"),
+    notes,
+    el("div", { class: "details-actions" }, saveBtn, saved)
+  );
+}
+
 function renderListing(product) {
   const { listing } = product;
   const copyBtn = el("button", { class: "btn btn-small", type: "button" }, "Copy listing");
   copyBtn.addEventListener("click", () => copyText(listingText(product), copyBtn));
+
+  const timing = product.vision_model
+    ? `${product.vision_model} looked in ${product.vision_seconds}s, ${product.model} wrote in ${product.writing_seconds}s`
+    : `${product.model} wrote it in ${product.generation_seconds}s`;
 
   $("#result").className = "listing";
   $("#result").replaceChildren(
@@ -149,12 +182,16 @@ function renderListing(product) {
       ? el(
           "div",
           { class: "ask" },
-          el("strong", {}, "Buyers will ask. Add these details:"),
+          el("strong", {}, "Buyers will ask. Answer these below:"),
           el("ul", {}, listing.missing_info.map((q) => el("li", {}, q)))
         )
       : null,
+    detailsBox(product),
     copyBtn,
-    el("p", { class: "meta" }, `Written by ${product.model} in ${product.generation_seconds}s, locally.`)
+    el("p", { class: "meta" }, `Done locally: ${timing}.`),
+    product.visual_notes
+      ? el("details", { class: "meta" }, el("summary", {}, "What the vision model saw"), product.visual_notes)
+      : null
   );
 }
 
@@ -163,8 +200,7 @@ function renderListing(product) {
 async function loadCatalog() {
   const grid = $("#catalog");
   try {
-    const res = await fetch("/api/products");
-    const products = await res.json();
+    const products = await api("/api/products");
     if (!products.length) {
       grid.replaceChildren(el("p", { class: "empty" }, "Nothing here yet. Create your first listing above."));
       return;
@@ -185,7 +221,7 @@ function catalogCard(product) {
   const delBtn = el("button", { class: "btn btn-small", type: "button" }, "Delete");
   delBtn.addEventListener("click", async () => {
     if (!confirm(`Delete "${product.name}"?`)) return;
-    await fetch(`/api/products/${product.id}`, { method: "DELETE" });
+    await api(`/api/products/${product.id}`, { method: "DELETE" });
     loadCatalog();
   });
 
@@ -198,10 +234,53 @@ function catalogCard(product) {
       { class: "body" },
       el("h3", {}, product.name),
       product.price ? el("span", { class: "price" }, product.price) : null,
+      product.seller_notes ? null : el("span", { class: "meta" }, "No details added yet"),
       el("div", { class: "actions" }, viewBtn, delBtn)
     )
   );
 }
 
+// ---------- unanswered buyer questions ----------
+
+async function loadQuestions() {
+  const box = $("#questions");
+  try {
+    const items = await api("/api/questions");
+    if (!items.length) {
+      box.replaceChildren(
+        el("p", { class: "empty" }, "None yet. When a buyer asks something your details don't cover, it shows up here.")
+      );
+      return;
+    }
+    box.replaceChildren(
+      el(
+        "ul",
+        { class: "qlist" },
+        items.map((q) => {
+          const done = el("button", { class: "btn btn-small", type: "button" }, "Done");
+          done.addEventListener("click", async () => {
+            await api(`/api/questions/${q.id}`, { method: "DELETE" });
+            loadQuestions();
+          });
+          return el(
+            "li",
+            {},
+            el(
+              "div",
+              {},
+              el("strong", {}, q.question),
+              q.product_name ? el("div", { class: "meta" }, `About: ${q.product_name}`) : null
+            ),
+            done
+          );
+        })
+      )
+    );
+  } catch {
+    box.replaceChildren(el("p", { class: "empty" }, "Couldn't load questions."));
+  }
+}
+
 checkHealth();
 loadCatalog();
+loadQuestions();

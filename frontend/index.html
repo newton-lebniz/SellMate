@@ -3,7 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>SellMate</title>
+  <title>SellMate: seller desk</title>
+  <link rel="icon" href="data:,">
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -15,7 +16,11 @@
         <p>Photos in, honest listing out. Runs on your laptop.</p>
       </div>
     </div>
-    <span id="health" class="pill pill-wait">Checking model…</span>
+    <nav class="nav">
+      <a href="/" aria-current="page">Seller desk</a>
+      <a href="/shop.html">Shop page (what buyers see)</a>
+      <span id="health" class="pill pill-wait">Checking models…</span>
+    </nav>
   </header>
 
   <main>
@@ -60,16 +65,22 @@
     </section>
   </main>
 
-  <section class="catalog" aria-labelledby="catalog-title">
+  <section class="wide" aria-labelledby="questions-title">
+    <h2 id="questions-title">Questions buyers asked that the assistant couldn't answer</h2>
+    <div id="questions" class="card"></div>
+  </section>
+
+  <section class="wide" aria-labelledby="catalog-title">
     <h2 id="catalog-title">Your catalog</h2>
     <div id="catalog" class="grid"></div>
   </section>
 
   <footer>
-    Open-weight Gemma via Ollama · your photos never leave this machine ·
+    Open-weight models via Ollama · your photos never leave this machine ·
     <a href="/docs">API docs</a>
   </footer>
 
+  <script src="common.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

@@ -1,5 +1,7 @@
-"""SellMate API. Run with: uvicorn backend.app.main:app --reload"""
-import time
+"""SellMate API. Run with: uvicorn backend.app.main:app --reload
+
+Single-seller local tool: there is no login, so don't expose it to the internet as is.
+"""
 from pathlib import Path
 from uuid import uuid4
 
@@ -7,20 +9,31 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 from . import config
-from .llm import LLMError, generate_listing, ollama_status, resize_image, to_b64
-from .models import Product
-from .storage import Catalog
+from .llm import (
+    LLMError,
+    answer_question,
+    generate_listing,
+    ollama_status,
+    resize_image,
+    to_b64,
+)
+from .models import ChatRequest, ChatResponse, Product, ProductUpdate, Question
+from .retrieval import format_facts, search
+from .storage import Catalog, QuestionLog
 
 config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SellMate", version="0.1.0")
+app = FastAPI(title="SellMate", version="0.2.0")
 catalog = Catalog(config.CATALOG_FILE)
+questions = QuestionLog(config.QUESTIONS_FILE, config.MAX_LOGGED_QUESTIONS)
 
 
 @app.get("/api/health")
 def health() -> dict:
     return {"app": "sellmate", **ollama_status()}
 
+
+# ---------- products ----------
 
 @app.get("/api/products", response_model=list[Product])
 def list_products():
@@ -33,6 +46,22 @@ def get_product(product_id: str):
     if product is None:
         raise HTTPException(404, "Product not found.")
     return product
+
+
+@app.patch("/api/products/{product_id}", response_model=Product)
+def update_product(product_id: str, body: ProductUpdate):
+    """Let the seller add the facts the photos couldn't show (and fix the price)."""
+    changes = {}
+    if "price" in body.model_fields_set:
+        changes["price"] = (body.price or "").strip() or None
+    if "seller_notes" in body.model_fields_set:
+        changes["seller_notes"] = (body.seller_notes or "").strip()
+    if not changes:
+        raise HTTPException(422, "Nothing to update.")
+    updated = catalog.update(product_id, **changes)
+    if updated is None:
+        raise HTTPException(404, "Product not found.")
+    return updated
 
 
 @app.delete("/api/products/{product_id}")
@@ -78,12 +107,10 @@ def create_product(
         except LLMError as exc:
             raise HTTPException(422, str(exc)) from exc
 
-    started = time.perf_counter()
     try:
-        listing = generate_listing([to_b64(j) for j in jpegs], keywords, price, category)
+        result = generate_listing([to_b64(j) for j in jpegs], keywords, price, category)
     except LLMError as exc:
         raise HTTPException(502, str(exc)) from exc
-    elapsed = round(time.perf_counter() - started, 1)
 
     # Only save photos once generation succeeded, so failures leave no orphans.
     photo_urls = []
@@ -93,16 +120,78 @@ def create_product(
         photo_urls.append(f"/uploads/{name}")
 
     product = Product(
-        name=listing.title,
+        name=result.listing.title,
         keywords=keywords,
         price=price,
         category=category,
         photos=photo_urls,
-        listing=listing,
+        listing=result.listing,
+        visual_notes=result.visual_notes,
         model=config.OLLAMA_MODEL,
-        generation_seconds=elapsed,
+        vision_model=config.VISION_MODEL,
+        vision_seconds=result.vision_seconds,
+        writing_seconds=result.writing_seconds,
+        generation_seconds=round(result.vision_seconds + result.writing_seconds, 1),
     )
     return catalog.add(product)
+
+
+# ---------- buyer chat ----------
+
+@app.post("/api/chat", response_model=ChatResponse)
+def chat(body: ChatRequest):
+    """Answer a buyer's question using only the seller's catalog."""
+    message = body.message.strip()
+    if not message:
+        raise HTTPException(422, "Type a question first.")
+
+    products = catalog.all()
+    if not products:
+        return ChatResponse(
+            answer="This shop doesn't have any items yet. Please check back soon!",
+            grounded=False,
+        )
+
+    focus = None
+    if body.product_id:
+        focus = next((p for p in products if p.id == body.product_id), None)
+        if focus is None:
+            raise HTTPException(404, "Product not found.")
+        context = [focus]
+    else:
+        context = search(list(reversed(products)), message, config.MAX_CONTEXT_PRODUCTS)
+        if not context:
+            # Nothing matched (e.g. "what do you sell?"): show the newest few as an overview.
+            context = list(reversed(products))[: config.MAX_CONTEXT_PRODUCTS]
+
+    try:
+        answer, grounded = answer_question(message, body.history, format_facts(context))
+    except LLMError as exc:
+        raise HTTPException(502, str(exc)) from exc
+
+    if not grounded:
+        # The assistant had to say "I don't know": keep the question for the seller.
+        about = focus or (context[0] if len(context) == 1 else None)
+        questions.add(
+            Question(
+                question=message,
+                product_id=about.id if about else None,
+                product_name=about.listing.title if about else None,
+            )
+        )
+    return ChatResponse(answer=answer, grounded=grounded, product_ids=[p.id for p in context])
+
+
+@app.get("/api/questions", response_model=list[Question])
+def list_questions():
+    return list(reversed(questions.all()))  # newest first
+
+
+@app.delete("/api/questions/{question_id}")
+def delete_question(question_id: str) -> dict:
+    if not questions.delete(question_id):
+        raise HTTPException(404, "Question not found.")
+    return {"deleted": question_id}
 
 
 # Static files last so the /api routes take priority.

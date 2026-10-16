@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>SellMate: shop</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="top">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">S</span>
+      <div>
+        <h1>Shop</h1>
+        <p>Ask the assistant anything about an item. It only answers from the seller's details.</p>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="/">Seller desk</a>
+      <a href="/shop.html" aria-current="page">Shop page (what buyers see)</a>
+    </nav>
+  </header>
+
+  <main class="shop">
+    <section aria-labelledby="items-title">
+      <h2 id="items-title">Items</h2>
+      <div id="items" class="grid grid-tight"></div>
+    </section>
+
+    <section class="card chat" aria-labelledby="chat-title">
+      <h2 id="chat-title">Ask about an item</h2>
+      <div id="focus" class="focus" hidden></div>
+      <div id="log" class="log" aria-live="polite">
+        <p class="empty">Pick an item, or just ask. For example: "What is it made of?"</p>
+      </div>
+      <div id="chips" class="chips"></div>
+      <form id="chat-form" class="chat-form">
+        <input id="message" type="text" maxlength="500" autocomplete="off"
+               placeholder="Type your question…" aria-label="Your question" required>
+        <button id="send" class="btn" type="submit">Ask</button>
+      </form>
+    </section>
+  </main>
+
+  <footer>
+    Answers come from the seller's own details, written by a model running on the seller's laptop.
+    If it doesn't know, it passes your question to the seller.
+  </footer>
+
+  <script src="common.js"></script>
+  <script src="shop.js"></script>
+</body>
+</html>

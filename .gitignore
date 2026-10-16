@@ -1,0 +1,19 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+
+# Environment
+.env
+
+# Runtime data (seller catalogs and photos stay on the seller's machine)
+data/catalog.json
+data/uploads/*
+!data/uploads/.gitkeep
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/

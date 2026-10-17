@@ -233,3 +233,20 @@ main.shop { grid-template-columns: 1.4fr 1fr; }
   main.shop { grid-template-columns: 1fr; }
   .chat { position: static; }
 }
+
+/* ---------- Day 3: claim warnings, rewrite button, ready-to-post panel ---------- */
+
+.btn-primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); }
+.btn-primary:hover:not(:disabled) { filter: brightness(1.08); }
+.ask.removed { border-color: #fecaca; background: #fef2f2; }
+.ask.removed strong { color: var(--bad); }
+.ask .meta { margin: 0.3rem 0 0; }
+
+.post { margin-bottom: 0.9rem; }
+.tabs { display: flex; gap: 0.4rem; margin: 0.4rem 0; }
+.tab {
+  font: inherit; font-size: 0.82rem; padding: 0.25rem 0.8rem; border-radius: 999px;
+  border: 1px solid var(--line); background: #fff; color: var(--ink); cursor: pointer;
+}
+.tab.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+.post textarea { background: var(--bg); font-size: 0.88rem; }

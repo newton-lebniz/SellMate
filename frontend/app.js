@@ -102,17 +102,6 @@ form.addEventListener("submit", async (event) => {
 
 // ---------- listing view ----------
 
-function listingText(product) {
-  const { listing, price } = product;
-  const parts = [listing.title, "", listing.description];
-  if (listing.highlights.length) {
-    parts.push("", ...listing.highlights.map((h) => `• ${h}`));
-  }
-  if (product.seller_notes) parts.push("", product.seller_notes);
-  if (price) parts.push("", `Price: ${price}`);
-  return parts.join("\n");
-}
-
 async function copyText(text, button) {
   try {
     await navigator.clipboard.writeText(text);
@@ -124,53 +113,169 @@ async function copyText(text, button) {
   }
 }
 
+// Set by whichever "Ready to post" panel is on screen, so saving details refreshes it.
+let refreshPost = () => {};
+
 // The seller's own facts are what the buyer-facing assistant trusts most.
 function detailsBox(product) {
   const notes = el("textarea", {
     rows: "3",
     maxlength: "800",
-    placeholder: "e.g. Sterling silver, 6 cm long, nickel free. Ships in 2 days.",
+    placeholder: "e.g. Sterling silver, 6 cm long, hand-tied with cotton thread. Ships in 2 days.",
     "aria-label": "Details for buyers",
   });
   notes.value = product.seller_notes || "";
-  const saved = el("span", { class: "meta" });
+  const message = el("span", { class: "meta" });
   const saveBtn = el("button", { class: "btn btn-small", type: "button" }, "Save details");
+  const rewriteBtn = el(
+    "button",
+    { class: "btn btn-small btn-primary", type: "button" },
+    "Rewrite listing with these details"
+  );
+  const setBusy = (busy) => {
+    saveBtn.disabled = busy;
+    rewriteBtn.disabled = busy;
+  };
+
+  const saveNotes = async () => {
+    const updated = await api(`/api/products/${product.id}`, {
+      method: "PATCH",
+      json: { seller_notes: notes.value },
+    });
+    product.seller_notes = updated.seller_notes;
+  };
+
   saveBtn.addEventListener("click", async () => {
-    saveBtn.disabled = true;
+    setBusy(true);
     try {
-      const updated = await api(`/api/products/${product.id}`, {
-        method: "PATCH",
-        json: { seller_notes: notes.value },
-      });
-      product.seller_notes = updated.seller_notes;
-      saved.textContent = "Saved. The shop assistant will use this.";
+      await saveNotes();
+      message.textContent = "Saved. The shop assistant will use this.";
       loadCatalog();
+      refreshPost();
     } catch (err) {
-      saved.textContent = err.message;
+      message.textContent = err.message;
     } finally {
-      saveBtn.disabled = false;
+      setBusy(false);
     }
   });
+
+  rewriteBtn.addEventListener("click", async () => {
+    setBusy(true);
+    const started = Date.now();
+    const tick = () => {
+      const s = Math.round((Date.now() - started) / 1000);
+      message.textContent = `Rewriting with your details… ${s}s (it reuses what it saw in the photos)`;
+    };
+    tick();
+    const timer = setInterval(tick, 1000);
+    try {
+      await saveNotes();
+      const updated = await api(`/api/products/${product.id}/regenerate`, { method: "POST" });
+      renderListing(updated);
+      loadCatalog();
+    } catch (err) {
+      message.textContent = err.message;
+      setBusy(false);
+    } finally {
+      clearInterval(timer);
+    }
+  });
+
   return el(
     "div",
     { class: "details" },
     el("strong", {}, "Your details for buyers"),
     notes,
-    el("div", { class: "details-actions" }, saveBtn, saved)
+    el("div", { class: "details-actions" }, saveBtn, rewriteBtn, message)
   );
+}
+
+// ---------- ready-to-post copy ----------
+
+const PLATFORMS = [
+  ["whatsapp", "WhatsApp"],
+  ["instagram", "Instagram"],
+  ["reddit", "Reddit"],
+];
+
+function postPanel(product) {
+  const box = el("textarea", { rows: "9", readonly: "", "aria-label": "Text to post" });
+  const note = el("p", { class: "meta" });
+  const copyBtn = el("button", { class: "btn btn-small btn-primary", type: "button" }, "Copy");
+  const tabs = PLATFORMS.map(([key, label]) => {
+    const tab = el("button", { class: "tab", type: "button", "data-key": key }, label);
+    tab.addEventListener("click", () => show(key));
+    return tab;
+  });
+  let current = "whatsapp";
+
+  async function show(key = current) {
+    current = key;
+    tabs.forEach((t) => t.classList.toggle("active", t.dataset.key === key));
+    try {
+      const copy = await api(`/api/products/${product.id}/copy`);
+      box.value = key === "reddit" ? `${copy.reddit_title}\n\n${copy.reddit_body}` : copy[key];
+      note.textContent = key === "reddit" ? copy.reminders.join(" ") : "";
+    } catch (err) {
+      box.value = "";
+      note.textContent = err.message;
+    }
+  }
+
+  copyBtn.addEventListener("click", () => copyText(box.value, copyBtn));
+  refreshPost = () => show();
+  show();
+
+  return el(
+    "div",
+    { class: "post" },
+    el("strong", {}, "Ready to post"),
+    el("div", { class: "tabs" }, tabs),
+    box,
+    el("div", { class: "details-actions" }, copyBtn),
+    note
+  );
+}
+
+// ---------- listing view ----------
+
+function claimBoxes(listing) {
+  return [
+    listing.removed_claims.length
+      ? el(
+          "div",
+          { class: "ask removed" },
+          el("strong", {}, "Left out because nobody confirmed them:"),
+          el("ul", {}, listing.removed_claims.map((c) => el("li", {}, c))),
+          el("p", { class: "meta" }, "If they're true, add them to your details and press Rewrite.")
+        )
+      : null,
+    listing.check_claims.length
+      ? el(
+          "div",
+          { class: "ask" },
+          el("strong", {}, "Check before you post:"),
+          el(
+            "ul",
+            {},
+            listing.check_claims.map((c) =>
+              el("li", {}, `"${c}": shown as "${c}-coloured" until you confirm it's the real metal.`)
+            )
+          )
+        )
+      : null,
+  ];
 }
 
 function renderListing(product) {
   const { listing } = product;
-  const copyBtn = el("button", { class: "btn btn-small", type: "button" }, "Copy listing");
-  copyBtn.addEventListener("click", () => copyText(listingText(product), copyBtn));
-
   const timing = product.vision_model
     ? `${product.vision_model} looked in ${product.vision_seconds}s, ${product.model} wrote in ${product.writing_seconds}s`
     : `${product.model} wrote it in ${product.generation_seconds}s`;
 
   $("#result").className = "listing";
-  $("#result").replaceChildren(
+  // replaceChildren() prints null as the text "null", so drop the empty optional sections.
+  const parts = [
     el("div", { class: "photos" }, product.photos.map((src) => el("img", { src, alt: "" }))),
     el("h3", {}, listing.title),
     el("p", {}, listing.description),
@@ -178,6 +283,7 @@ function renderListing(product) {
     listing.tags.length
       ? el("div", { class: "tags" }, listing.tags.map((t) => el("span", { class: "tag" }, `#${t}`)))
       : null,
+    ...claimBoxes(listing),
     listing.missing_info.length
       ? el(
           "div",
@@ -187,12 +293,13 @@ function renderListing(product) {
         )
       : null,
     detailsBox(product),
-    copyBtn,
+    postPanel(product),
     el("p", { class: "meta" }, `Done locally: ${timing}.`),
     product.visual_notes
       ? el("details", { class: "meta" }, el("summary", {}, "What the vision model saw"), product.visual_notes)
-      : null
-  );
+      : null,
+  ];
+  $("#result").replaceChildren(...parts.filter(Boolean));
 }
 
 // ---------- catalog ----------
@@ -269,7 +376,13 @@ async function loadQuestions() {
               "div",
               {},
               el("strong", {}, q.question),
-              q.product_name ? el("div", { class: "meta" }, `About: ${q.product_name}`) : null
+              el(
+                "div",
+                { class: "meta" },
+                [q.product_name ? `About: ${q.product_name}` : null, q.count > 1 ? `Asked ${q.count} times` : null]
+                  .filter(Boolean)
+                  .join(" · ")
+              )
             ),
             done
           );

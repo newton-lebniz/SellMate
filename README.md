@@ -22,7 +22,10 @@ The seller answers the same questions all day, and writing a good description fo
 1. **Seller desk.** Drop 1-3 photos and a few keywords. SellMate writes a title, description, highlights and tags.
 2. **It asks instead of guessing.** Anything buyers care about that the photo can't show (material, size, delivery) comes back as a question for the seller. The seller types the answers once.
 3. **Shop page.** Buyers ask questions in a chat. The assistant answers **only** from the listing and the seller's own details.
-4. **Seller inbox.** If the assistant doesn't know, it says so, tells the buyer the question was passed on, and the seller sees it on the desk.
+4. **Seller inbox.** If the assistant doesn't know, it says so, tells the buyer the question was passed on, and the seller sees it on the desk. The same question asked again is counted, not repeated.
+5. **Claim guard.** A photo shows colours, not materials. If the model calls a gold-coloured bracelet "gold", or claims "hand-tied" or "hypoallergenic" and the seller never said so, SellMate removes or softens the claim and asks the seller.
+6. **Rewrite with my details.** Once the seller confirms the material and how it was made, one click rewrites the listing using those facts (it reuses what it already saw in the photos, so it's faster).
+7. **Ready to post.** WhatsApp, Instagram and Reddit versions of the listing, one click to copy.
 
 ## Why open models matter here
 
@@ -38,21 +41,32 @@ The seller answers the same questions all day, and writing a good description fo
 ## How it works
 
 ```
-                 seller desk                                   shop page
-photos + keywords                                        buyer question
-        │                                                       │
-        ▼                                                       ▼
-resize + strip EXIF                                  pick the 1-3 matching products
-        │                                                       │
-        ▼                                                       ▼
- Moondream (looks at each photo)                      Gemma 1B answers from those
-        │  "a small round silver ring..."               facts only (JSON: answer +
-        ▼                                               answered_from_catalog)
- Gemma 1B writes the listing                                    │
- (photo notes + seller's words)                       grounded?  yes → show answer
-        │                                                        no  → show answer,
-        ▼                                                              log the question
-   catalog.json                                                        for the seller
+photos + keywords (+ seller's confirmed details)
+        │
+        ▼
+resize + strip EXIF
+        │
+        ▼
+Moondream looks at each photo ──▶ "three bracelets: gold, silver, white"   (photo notes: looks only)
+        │
+        ▼
+Gemma 1B writes the listing from SELLER-CONFIRMED FACTS + photo notes
+        │
+        ▼
+CLAIM GUARD (plain code, no model): anything the seller never said is removed or softened
+        │                             "Silver Bracelet" → "Silver-coloured Bracelet"
+        ▼
+catalog.json ──▶ ready-to-post copy (templates: WhatsApp, Instagram, Reddit)
+
+buyer question ──▶ price? ──yes──▶ answered from the price field (no model)
+        │ no
+        ▼
+pick the 1-3 matching products ──▶ Gemma 1B answers from those facts, in plain text
+        │
+        ▼
+does the answer say "I don't know" / "ask the seller"?
+   no  → show it
+   yes → show it, and add the question to the seller's inbox (repeats are counted)
 ```
 
 Why two models? A 1B text model writes well but cannot see images, and a vision-capable 4B model is heavy on a CPU-only laptop. A tiny vision model describes the photo, and the text model does the writing. If you have the hardware, set `VISION_MODEL=` (empty) and use a vision-capable model such as `gemma3:4b` as the only model.
@@ -94,6 +108,7 @@ export OLLAMA_URL="http://<windows-host-ip>:11434"   # find it with: ip route sh
 | `OLLAMA_MODEL` | `gemma3:1b` | Text model: writes listings, answers buyers |
 | `VISION_MODEL` | `moondream` | Looks at photos. Empty = send photos to `OLLAMA_MODEL` (needs a vision model) |
 | `OLLAMA_TIMEOUT` | `300` | Seconds to wait for each model call |
+| `SELLMATE_DEBUG` | off | Set to `1` to print every raw chat reply to the server console |
 | `SELLMATE_DATA_DIR` | `./data` | Where the catalog, questions and photos are stored |
 
 ## Tests
@@ -102,20 +117,29 @@ export OLLAMA_URL="http://<windows-host-ip>:11434"   # find it with: ip route sh
 pytest
 ```
 
-The tests use a fake Ollama, so they run anywhere. They include the two-stage pipeline: the text model must never receive images, and must receive what the vision model saw.
+The tests use a fake Ollama, so they run anywhere. Photo EXIF/GPS stripping has its own test with a real GPS-tagged image. They include the two-stage pipeline (the text model must never receive images), regression tests for the Oct 17 live-test bugs (answered questions must not reach the inbox), and a fixture holding the real bracelet listing from that test.
+
+A test that can't fail proves nothing, so this puts nine known bugs back one at a time (in a scratch copy) and checks the tests notice:
+
+```bash
+python scripts/mutation_check.py
+```
 
 ## Honest limitations
 
-- **Small models are vague.** Moondream gives short, generic captions, and Gemma 1B sometimes writes plain prose. That's why the seller's own details outrank the photo notes everywhere.
-- **"Grounded" is self-reported.** The assistant says whether its answer came from the catalog facts. A 1B model can be wrong about that, so treat the seller inbox as a safety net, not a guarantee.
+- **Small models are vague.** Moondream gives short, generic captions, and Gemma 1B can still write filler ("made with love"). The seller's own details outrank the photo notes everywhere.
+- **The claim guard is a word list, not understanding.** It catches common materials, techniques and quality claims (leather, sterling, hand-woven, hypoallergenic, ...). A claim in words it doesn't know gets through, so read the listing before you post it.
+- **The inbox trusts the wording of the answer.** If the assistant doesn't know but phrases it in an unusual way, the question won't be logged. (Day 2 asked the model to flag this itself; on the first live test it flagged the wrong questions, so that was removed.)
+- **A "not confirmed" answer counts as a hand-off.** If the seller's details say the material is unconfirmed and a buyer asks, that question goes to the inbox: the buyer didn't get an answer, and the seller should see the demand.
 - **No login yet.** This is a single-seller local tool. Don't expose it to the internet as it is.
-- **CPU is slow.** Expect tens of seconds per reply, and minutes for a first listing.
+- **CPU is slow.** On a 16 GB CPU-only laptop, one photo took about 22 s to look at and 18 s to write.
 
 ## Roadmap
 
 - [x] **Day 1:** photo + keywords to listing, local catalog, simple web UI
 - [x] **Day 2:** two-stage vision fix, seller details, buyer chat grounded in the catalog, seller inbox
-- [ ] **Day 3:** platform-ready copy for WhatsApp / Instagram / Reddit, demo, DEV post
+- [x] **Day 3:** fixed false inbox entries, claim guard, rewrite with seller details, ready-to-post copy
+- [ ] **Next:** first real seller, demo, DEV post
 
 ## License
 

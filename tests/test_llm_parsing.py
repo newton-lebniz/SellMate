@@ -8,7 +8,7 @@ from backend.app.llm import (
     LLMError,
     _has_model,
     _ollama_error,
-    parse_chat_json,
+    clean_chat_answer,
     parse_listing_json,
     resize_image,
 )
@@ -71,35 +71,24 @@ def test_resize_rejects_non_images():
         resize_image(b"definitely not an image")
 
 
-# ---------- chat parsing ----------
+# ---------- chat answer cleaning ----------
 
-def test_chat_json_grounded():
-    assert parse_chat_json('{"answer": "Yes, it is silver.", "answered_from_catalog": true}') == (
-        "Yes, it is silver.",
-        True,
-    )
+def test_plain_text_answer_is_returned_as_is():
+    assert clean_chat_answer("The price is 100.") == "The price is 100."
 
 
-def test_chat_json_not_grounded():
-    answer, grounded = parse_chat_json('{"answer": "I will ask.", "answered_from_catalog": false}')
-    assert answer == "I will ask." and grounded is False
+def test_json_wrapped_answer_is_unwrapped():
+    assert clean_chat_answer('{"answer": "It is blue."}') == "It is blue."
 
 
-def test_chat_missing_flag_is_treated_as_not_grounded():
-    assert parse_chat_json('{"answer": "Maybe."}')[1] is False
+def test_role_prefix_is_stripped():
+    assert clean_chat_answer("Assistant: It is blue.") == "It is blue."
 
 
-def test_chat_string_true_is_not_trusted():
-    assert parse_chat_json('{"answer": "Yes.", "answered_from_catalog": "true"}')[1] is False
-
-
-def test_chat_plain_prose_is_kept_but_not_grounded():
-    assert parse_chat_json("It costs 500 rupees.") == ("It costs 500 rupees.", False)
-
-
-def test_chat_empty_output_raises():
+@pytest.mark.parametrize("bad", ["", "   ", "{}", '{"foo": "bar"}'])
+def test_empty_or_unusable_answer_raises(bad):
     with pytest.raises(LLMError):
-        parse_chat_json("")
+        clean_chat_answer(bad)
 
 
 # ---------- model matching and error messages ----------
@@ -132,3 +121,20 @@ def test_missing_model_error_gives_pull_command():
 
 def test_unknown_error_shows_ollama_detail():
     assert "boom" in _ollama_error(_response(500, {"error": "boom"}), "gemma3:1b")
+
+
+def test_resize_strips_exif_including_gps():
+    """The post says photos lose their location data before any model sees them. Prove it."""
+    exif = Image.Exif()
+    exif[0x010F] = "TestCam"
+    gps = exif.get_ifd(0x8825)  # the GPS block
+    gps[1], gps[2], gps[3], gps[4] = "N", (12.0, 58.0, 0.0), "E", (77.0, 35.0, 0.0)
+    buf = io.BytesIO()
+    Image.new("RGB", (400, 400), "red").save(buf, format="JPEG", exif=exif)
+
+    source = Image.open(io.BytesIO(buf.getvalue())).getexif()
+    assert source.get_ifd(0x8825), "test setup: the input photo must carry GPS data"
+
+    cleaned = Image.open(io.BytesIO(resize_image(buf.getvalue()))).getexif()
+    assert dict(cleaned) == {}
+    assert cleaned.get_ifd(0x8825) == {}

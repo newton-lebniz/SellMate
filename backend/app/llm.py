@@ -17,6 +17,7 @@ import httpx
 from PIL import Image, ImageOps
 
 from . import config
+from .claims import guard, seller_text
 from .models import ChatTurn, Listing
 from .prompts import (
     SYSTEM_PROMPT,
@@ -99,17 +100,19 @@ def parse_listing_json(text: str) -> Listing:
     )
 
 
-def parse_chat_json(text: str) -> tuple[str, bool]:
-    """Return (answer, grounded). If the model ignored the JSON format and just
-    wrote prose, keep the prose but treat it as NOT grounded so the seller is told."""
+def clean_chat_answer(text: str) -> str:
+    """The chat model replies in plain text. If a small model wraps it in JSON anyway
+    (it sometimes does), pull the answer out instead of showing braces to a buyer."""
     data = _extract_json(text)
-    if data is not None and str(data.get("answer", "")).strip():
-        grounded = data.get("answered_from_catalog") is True
-        return str(data["answer"]).strip(), grounded
+    if data is not None:
+        for key in ("answer", "reply", "response"):
+            if str(data.get(key, "")).strip():
+                return str(data[key]).strip()
     plain = (text or "").strip()
-    if plain and not plain.startswith("{"):
-        return plain, False
-    raise LLMError("The assistant didn't produce an answer. Please try again.")
+    plain = re.sub(r"^(assistant|answer)\s*:\s*", "", plain, flags=re.IGNORECASE)
+    if not plain or plain.startswith("{"):
+        raise LLMError("The assistant didn't produce an answer. Please try again.")
+    return plain
 
 
 # ---------- Ollama plumbing ----------
@@ -246,19 +249,23 @@ def generate_listing(
     keywords: str,
     price: str | None = None,
     category: str | None = None,
+    seller_notes: str = "",
+    visual_notes: str | None = None,
 ) -> Generation:
+    """Write a listing. Pass visual_notes to reuse an earlier look at the photos (a rewrite
+    after the seller added details then skips the slow vision stage)."""
     started = time.perf_counter()
-    visual_notes = ""
+    notes = ""
     if two_stage():
-        visual_notes = describe_photos(images_b64)
+        notes = visual_notes or describe_photos(images_b64)
         user = {
             "role": "user",
-            "content": build_listing_prompt(keywords, price, category, visual_notes),
+            "content": build_listing_prompt(keywords, price, category, notes, seller_notes),
         }
     else:
         user = {
             "role": "user",
-            "content": build_listing_prompt(keywords, price, category),
+            "content": build_listing_prompt(keywords, price, category, None, seller_notes),
             "images": images_b64,
         }
     vision_done = time.perf_counter()
@@ -269,11 +276,12 @@ def generate_listing(
         json_mode=True,
         num_predict=700,
     )
-    listing = parse_listing_json(text)
+    # Deterministic check: nothing the seller didn't confirm survives as a fact.
+    listing = guard(parse_listing_json(text), seller_text(keywords, category, seller_notes))
     finished = time.perf_counter()
     return Generation(
         listing=listing,
-        visual_notes=visual_notes,
+        visual_notes=notes,
         vision_seconds=round(vision_done - started, 1),
         writing_seconds=round(finished - vision_done, 1),
     )
@@ -281,13 +289,13 @@ def generate_listing(
 
 # ---------- buyer chat ----------
 
-def answer_question(question: str, history: list[ChatTurn], facts: str) -> tuple[str, bool]:
-    """Answer a buyer's question from the given catalog facts. Returns (answer, grounded)."""
+def answer_question(question: str, history: list[ChatTurn], facts: str) -> str:
+    """Answer a buyer's question from the given catalog facts (plain text)."""
     messages = [{"role": "system", "content": build_chat_system_prompt(facts)}]
     for turn in history[-config.MAX_HISTORY_TURNS:]:
         messages.append({"role": turn.role, "content": turn.content})
     messages.append({"role": "user", "content": question})
-    text = _chat(
-        config.OLLAMA_MODEL, messages, json_mode=True, num_predict=250, temperature=0.2
-    )
-    return parse_chat_json(text)
+    text = _chat(config.OLLAMA_MODEL, messages, num_predict=200, temperature=0.2)
+    if config.DEBUG:
+        print(f"[sellmate debug] question={question!r}\n[sellmate debug] raw reply={text!r}")
+    return clean_chat_answer(text)

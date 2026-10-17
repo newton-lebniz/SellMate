@@ -2,6 +2,7 @@
 
 Single-seller local tool: there is no login, so don't expose it to the internet as is.
 """
+import base64
 from pathlib import Path
 from uuid import uuid4
 
@@ -9,6 +10,8 @@ from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.staticfiles import StaticFiles
 
 from . import config
+from .copywriter import PlatformCopy, build_platform_copy
+from .handoff import is_price_question, looks_unsure
 from .llm import (
     LLMError,
     answer_question,
@@ -23,7 +26,7 @@ from .storage import Catalog, QuestionLog
 
 config.UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
-app = FastAPI(title="SellMate", version="0.2.0")
+app = FastAPI(title="SellMate", version="0.3.0")
 catalog = Catalog(config.CATALOG_FILE)
 questions = QuestionLog(config.QUESTIONS_FILE, config.MAX_LOGGED_QUESTIONS)
 
@@ -136,7 +139,67 @@ def create_product(
     return catalog.add(product)
 
 
+@app.post("/api/products/{product_id}/regenerate", response_model=Product)
+def regenerate_product(product_id: str):
+    """Rewrite the listing using the seller's saved details.
+
+    The photos were already looked at, so in two-stage mode the saved photo notes are
+    reused and only the (faster) writing stage runs again.
+    """
+    product = catalog.get(product_id)
+    if product is None:
+        raise HTTPException(404, "Product not found.")
+    images = []
+    for url in product.photos:
+        path = config.UPLOAD_DIR / Path(url).name
+        if not path.exists():
+            raise HTTPException(409, "The original photos are missing, so the listing can't be rewritten.")
+        images.append(base64.b64encode(path.read_bytes()).decode("ascii"))
+    try:
+        result = generate_listing(
+            images,
+            product.keywords,
+            product.price,
+            product.category,
+            seller_notes=product.seller_notes,
+            visual_notes=product.visual_notes or None,
+        )
+    except LLMError as exc:
+        raise HTTPException(502, str(exc)) from exc
+    return catalog.update(
+        product_id,
+        name=result.listing.title,
+        listing=result.listing,
+        visual_notes=result.visual_notes or product.visual_notes,
+        model=config.OLLAMA_MODEL,
+        vision_model=config.VISION_MODEL,
+        vision_seconds=result.vision_seconds,
+        writing_seconds=result.writing_seconds,
+        generation_seconds=round(result.vision_seconds + result.writing_seconds, 1),
+    )
+
+
+@app.get("/api/products/{product_id}/copy", response_model=PlatformCopy)
+def platform_copy(product_id: str):
+    """Ready-to-paste text for WhatsApp, Instagram and Reddit (templates, no model call)."""
+    product = catalog.get(product_id)
+    if product is None:
+        raise HTTPException(404, "Product not found.")
+    return build_platform_copy(product)
+
+
 # ---------- buyer chat ----------
+
+def _hand_off(message: str, product: Product | None) -> None:
+    """Keep a question the assistant couldn't answer, for the seller."""
+    questions.add_or_bump(
+        Question(
+            question=message,
+            product_id=product.id if product else None,
+            product_name=product.listing.title if product else None,
+        )
+    )
+
 
 @app.post("/api/chat", response_model=ChatResponse)
 def chat(body: ChatRequest):
@@ -149,7 +212,7 @@ def chat(body: ChatRequest):
     if not products:
         return ChatResponse(
             answer="This shop doesn't have any items yet. Please check back soon!",
-            grounded=False,
+            answered=False,
         )
 
     focus = None
@@ -164,27 +227,40 @@ def chat(body: ChatRequest):
             # Nothing matched (e.g. "what do you sell?"): show the newest few as an overview.
             context = list(reversed(products))[: config.MAX_CONTEXT_PRODUCTS]
 
+    # The one item this question is about, if we can tell.
+    target = focus or (context[0] if len(context) == 1 else None)
+    ids = [p.id for p in context]
+
+    # Price is a field, not something to ask a 1B model about: instant and always right.
+    if target is not None and is_price_question(message):
+        if target.price:
+            return ChatResponse(
+                answer=f"The price of {target.listing.title} is {target.price}.",
+                answered=True,
+                product_ids=ids,
+            )
+        _hand_off(message, target)
+        return ChatResponse(
+            answer="I don't know yet, the seller hasn't set a price. I've passed your question on.",
+            answered=False,
+            product_ids=ids,
+        )
+
     try:
-        answer, grounded = answer_question(message, body.history, format_facts(context))
+        answer = answer_question(message, body.history, format_facts(context))
     except LLMError as exc:
         raise HTTPException(502, str(exc)) from exc
 
-    if not grounded:
-        # The assistant had to say "I don't know": keep the question for the seller.
-        about = focus or (context[0] if len(context) == 1 else None)
-        questions.add(
-            Question(
-                question=message,
-                product_id=about.id if about else None,
-                product_name=about.listing.title if about else None,
-            )
-        )
-    return ChatResponse(answer=answer, grounded=grounded, product_ids=[p.id for p in context])
+    # Decided by what the answer says, not by a flag the model fills in (see handoff.py).
+    answered = not looks_unsure(answer)
+    if not answered:
+        _hand_off(message, target)
+    return ChatResponse(answer=answer, answered=answered, product_ids=ids)
 
 
 @app.get("/api/questions", response_model=list[Question])
 def list_questions():
-    return list(reversed(questions.all()))  # newest first
+    return list(reversed(questions.all()))  # most recently asked first
 
 
 @app.delete("/api/questions/{question_id}")

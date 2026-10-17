@@ -1,0 +1,25 @@
+{
+  "keywords": "handmade bracelets",
+  "price": "100",
+  "category": "jewelry",
+  "listing": {
+    "title": "Handcrafted Silver Bracelet Trio",
+    "description": "Discover three unique bracelets crafted with care. These three bracelets feature a beautiful, hand-tied design with a classic chain-like style. Each bracelet showcases a distinct color – gold, silver, and white – creating a charming and stylish collection. The bracelets are beautifully set against a pure white background, ensuring vibrant color pops. Handmade with love, perfect for adding a touch of elegance to your everyday look.\n\nThis is a perfect piece to add a little sparkle to your jewelry collection.",
+    "highlights": [
+      "Handmade",
+      "Three bracelets",
+      "Different colors (gold, silver, white)"
+    ],
+    "tags": [
+      "jewelry",
+      "handmade bracelet",
+      "silver bracelet",
+      "gift"
+    ],
+    "missing_info": [
+      "What is the material of the bracelets?"
+    ]
+  },
+  "visual_notes": "Photo 1: The image shows three bracelets arranged in a row, each with a different color and style. The first bracelet is gold, the second is silver, and the third is white. The bracelets have a chain-like design and are attached to a silver chain. The bracelets are set against a white background, making the colors of the bracelets stand out.",
+  "seller_notes": "The exact material has not been confirmed."
+}

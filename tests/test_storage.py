@@ -85,3 +85,28 @@ def test_question_log_keeps_only_the_newest(tmp_path):
     for i in range(5):
         log.add(Question(question=f"q{i}"))
     assert [q.question for q in log.all()] == ["q2", "q3", "q4"]
+
+
+def test_repeat_question_is_counted_and_moves_to_the_top(tmp_path):
+    log = QuestionLog(tmp_path / "q.json")
+    log.add_or_bump(Question(question="What is it made of?", product_id="p1"))
+    log.add_or_bump(Question(question="What size?", product_id="p1"))
+    bumped = log.add_or_bump(Question(question="what's it made of", product_id="p1"))
+    assert bumped.count == 2
+    assert [(q.question, q.count) for q in log.all()] == [("What size?", 1), ("What is it made of?", 2)]
+
+
+def test_same_question_about_another_product_is_a_separate_row(tmp_path):
+    log = QuestionLog(tmp_path / "q.json")
+    log.add_or_bump(Question(question="What size?", product_id="p1"))
+    log.add_or_bump(Question(question="What size?", product_id="p2"))
+    assert len(log.all()) == 2
+
+
+def test_day2_question_files_without_a_count_still_load(tmp_path):
+    import json
+
+    path = tmp_path / "q.json"
+    path.write_text(json.dumps([{"id": "a", "question": "What size?", "product_id": "p1",
+                                 "product_name": "Ring", "created_at": "2026-10-17T05:47:07+00:00"}]))
+    assert QuestionLog(path).all()[0].count == 1

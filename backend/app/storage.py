@@ -5,7 +5,8 @@ import tempfile
 import threading
 from pathlib import Path
 
-from .models import Product, Question
+from .handoff import question_key
+from .models import Product, Question, _now
 
 
 def _atomic_write_json(path: Path, items: list[dict]) -> None:
@@ -91,6 +92,24 @@ class QuestionLog:
     def add(self, question: Question) -> Question:
         with self._lock:
             items = self._read()
+            items.append(question)
+            items = items[-self.max_items:]
+            _atomic_write_json(self.path, [q.model_dump() for q in items])
+        return question
+
+    def add_or_bump(self, question: Question) -> Question:
+        """Log a question, or if the same question about the same product is already waiting
+        for the seller, count it again instead of adding a duplicate row."""
+        key = question_key(question.question, question.product_id)
+        with self._lock:
+            items = self._read()
+            for i, existing in enumerate(items):
+                if question_key(existing.question, existing.product_id) == key:
+                    items.pop(i)
+                    question = existing.model_copy(
+                        update={"count": existing.count + 1, "last_asked_at": _now()}
+                    )
+                    break
             items.append(question)
             items = items[-self.max_items:]
             _atomic_write_json(self.path, [q.model_dump() for q in items])

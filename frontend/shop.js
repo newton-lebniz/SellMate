@@ -93,7 +93,7 @@ async function ask(question) {
     addBubble(
       "assistant",
       data.answer,
-      data.grounded ? null : "Your question was passed on to the seller."
+      data.answered ? null : "Your question was passed on to the seller."
     );
     turns.push({ role: "assistant", content: data.answer });
   } catch (err) {

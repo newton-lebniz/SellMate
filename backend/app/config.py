@@ -31,3 +31,6 @@ MAX_HISTORY_TURNS = 6
 MAX_SELLER_NOTES_CHARS = 800
 MAX_CONTEXT_PRODUCTS = 3
 MAX_LOGGED_QUESTIONS = 100
+
+# SELLMATE_DEBUG=1 prints each raw chat reply to the server console.
+DEBUG = os.getenv("SELLMATE_DEBUG", "") not in ("", "0", "false")

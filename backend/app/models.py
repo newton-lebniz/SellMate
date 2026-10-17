@@ -19,6 +19,9 @@ class Listing(BaseModel):
     tags: list[str] = Field(default_factory=list)
     # Questions for the seller about details buyers care about but the photos don't show.
     missing_info: list[str] = Field(default_factory=list)
+    # Set by the claim guard (claims.py), not by the model:
+    removed_claims: list[str] = Field(default_factory=list)  # taken out: nobody confirmed them
+    check_claims: list[str] = Field(default_factory=list)  # kept, but the seller should confirm
 
 
 class Product(BaseModel):
@@ -65,8 +68,8 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     answer: str
-    # True only if the model says the answer came from the catalog facts.
-    grounded: bool
+    # False when the assistant had to hand the question to the seller.
+    answered: bool
     product_ids: list[str] = Field(default_factory=list)
 
 
@@ -77,4 +80,6 @@ class Question(BaseModel):
     question: str
     product_id: str | None = None
     product_name: str | None = None
+    count: int = 1  # the same question asked again bumps this instead of adding a row
     created_at: str = Field(default_factory=_now)
+    last_asked_at: str = Field(default_factory=_now)

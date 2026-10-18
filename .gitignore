@@ -18,3 +18,8 @@ data/uploads/*
 .DS_Store
 .idea/
 .vscode/
+
+# Working notes (not part of the project)
+docs/DEV_POST_DRAFT.md
+docs/SUBMISSION_CHECKLIST.md
+docs/POST_NOTES.md
